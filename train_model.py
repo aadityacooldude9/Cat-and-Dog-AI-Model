@@ -8,12 +8,12 @@ import cv2
 import os
 from model_definition import CatDogModel
 
-
 BATCH_SIZE = 16
-EPOCHS = 10
+TOTAL_EPOCHS = 10000
 IMAGE_SIZE = 224
 TRAIN_CSV = 'train_balanced.csv'
 VAL_CSV = 'val.csv'
+CHECKPOINT_PATH = 'checkpoint.pth'
 
 class CatDogDataset(Dataset):
     def __init__(self, csv_file, transform=None):
@@ -37,7 +37,6 @@ class CatDogDataset(Dataset):
 
         return image, label
 
-
 transform = transforms.Compose([
     transforms.ToPILImage(),
     transforms.Resize((IMAGE_SIZE, IMAGE_SIZE)),
@@ -48,7 +47,6 @@ transform = transforms.Compose([
     transforms.Normalize(mean=[0.485, 0.456, 0.406],
                          std=[0.229, 0.224, 0.225])
 ])
-
 
 train_dataset = CatDogDataset(TRAIN_CSV, transform)
 val_dataset = CatDogDataset(VAL_CSV, transform)
@@ -63,60 +61,65 @@ criterion = nn.CrossEntropyLoss()
 optimizer = optim.Adam(model.parameters(), lr=0.001)
 scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=5, gamma=0.5)
 
+start_epoch = 0
+if os.path.exists(CHECKPOINT_PATH):
+    checkpoint = torch.load(CHECKPOINT_PATH, map_location=device)
+    model.load_state_dict(checkpoint['model_state_dict'])
+    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+    scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+    start_epoch = checkpoint['epoch'] + 1
 
-for epoch in range(EPOCHS):
-    try:
-        model.train()
-        train_loss, train_correct, train_total = 0.0, 0, 0
+if start_epoch >= TOTAL_EPOCHS:
+    print(f"Training has already reached {TOTAL_EPOCHS} epochs.")
+    print("Increase TOTAL_EPOCHS in config to continue training.")
+    exit()
 
-        for images, labels in train_loader:
+for epoch in range(start_epoch, TOTAL_EPOCHS):
+    model.train()
+    train_loss, train_correct, train_total = 0.0, 0, 0
+
+    for images, labels in train_loader:
+        images, labels = images.to(device), labels.to(device)
+
+        outputs = model(images)
+        loss = criterion(outputs, labels)
+
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+        train_loss += loss.item()
+        _, preds = torch.max(outputs, 1)
+        train_correct += (preds == labels).sum().item()
+        train_total += labels.size(0)
+
+    train_acc = 100.0 * train_correct / train_total
+    avg_train_loss = train_loss / len(train_loader)
+
+    model.eval()
+    val_loss, val_correct, val_total = 0.0, 0, 0
+    with torch.no_grad():
+        for images, labels in val_loader:
             images, labels = images.to(device), labels.to(device)
-
             outputs = model(images)
             loss = criterion(outputs, labels)
-
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-
-            train_loss += loss.item()
+            val_loss += loss.item()
             _, preds = torch.max(outputs, 1)
-            train_correct += (preds == labels).sum().item()
-            train_total += labels.size(0)
+            val_correct += (preds == labels).sum().item()
+            val_total += labels.size(0)
 
-        train_acc = 100.0 * train_correct / train_total
-        avg_train_loss = train_loss / len(train_loader)
+    val_acc = 100.0 * val_correct / val_total
+    avg_val_loss = val_loss / len(val_loader)
+    scheduler.step()
 
+    print(f"Epoch {epoch+1}/{TOTAL_EPOCHS}")
+    print(f"Train Loss: {avg_train_loss:.4f} | Train Acc: {train_acc:.2f}%")
+    print(f"Val   Loss: {avg_val_loss:.4f} | Val   Acc: {val_acc:.2f}%")
 
-        model.eval()
-        val_loss, val_correct, val_total = 0.0, 0, 0
-        with torch.no_grad():
-            for images, labels in val_loader:
-                images, labels = images.to(device), labels.to(device)
-
-                outputs = model(images)
-                loss = criterion(outputs, labels)
-
-                val_loss += loss.item()
-                _, preds = torch.max(outputs, 1)
-                val_correct += (preds == labels).sum().item()
-                val_total += labels.size(0)
-
-        val_acc = 100.0 * val_correct / val_total
-        avg_val_loss = val_loss / len(val_loader)
-        scheduler.step()
-
-        print(f" Epoch [{epoch+1}/{EPOCHS}]")
-        print(f"   Train Loss: {avg_train_loss:.4f} | Train Acc: {train_acc:.2f}%")
-        print(f"  Val   Loss: {avg_val_loss:.4f} | Val   Acc: {val_acc:.2f}%")
-
-    except Exception as e:
-        print(f" Error during epoch {epoch+1}: {e}")
-
-# ========================
-# SAVE MODEL
-# ========================
-torch.save(model.state_dict(), "cat_dog_model_boosted.pth")
-
-
-
+    torch.save({
+        'epoch': epoch,
+        'model_state_dict': model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'scheduler_state_dict': scheduler.state_dict(),
+    }, CHECKPOINT_PATH)
+    print("Checkpoint saved.")
